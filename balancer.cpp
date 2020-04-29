@@ -175,7 +175,7 @@ bool ShowValues(Acelerometer&  ACC, SAnzeige& Anzeige, int8_t *actualValues, int
 	if(!Test)
 		return Test;
 
-	uint8_t difference[3];
+	int8_t difference[3];
 
 	//Calculation
 	for(int i = 0; i < 3; i++)
