@@ -1,60 +1,32 @@
-/*
+//*
  * balancer.cpp
  *
  *  Created on: 25.08.2016
  *      Author: Michael
  */
 
-#include "balancer.h"
-
 #define USE_ENHANCED
 
 /* --Standard include. */
 #include <cstdio>
 #include <cstdlib>
-#include <inttypes.h>
+#include <cinttypes>
+
+#include "balancer.h"
 
 /* --Platform include. */
 #include "cmsis_os.h"
 
 using GPIO=Platform::BSP::DigitalInOut;
-using Acelerometer=Platform::BSP::MMA7455;
 using SAnzeige=Platform::BSP::SR74LVC595;
-enum class ProgrammState{Start, Calibrate, ShowValues};
-
-
-/*! @brief Check if SW2 is pressed, debounce implemented
-	 *  @param[in] Center button as a class object
-	 *  @return @c true if it´s pressed, false if not
-	 */
-bool SW2isPressed(GPIO& Taster);
-
-/*! @brief Set the zero position values
-	 *  @param[in] Acelerometer as a class object
-	 *  @param[out] Array of zero position directions (x,y,z)
-	 *  @return @c false if calibration failed
-	 */
-bool Calibrate(Acelerometer& ACC, int8_t *refValues);
-
-/*! @brief Set the zero position values
-	 *  @param[in] Accelerometer as a class object
-	 *  @param[in] 7SegmentAnzeige as a class object
-	 *  @param[out] Array of current directions(x,y,z)
-	 *  param[out] Array of zero position directions (x,y,z)
-	 *  @return @c false if the calculation failed
-	 */
-bool ShowValues(Acelerometer& ACC, SAnzeige& Anzeige, int8_t *actualValues, int8_t *refValues);
-
-//
-//TODO Für den zweiten Teil der Aufgabe ist eine eigene Klasse mit zusätzl. Selbtestfunktionalität zu entwerfen.
-//
+enum class ProgrammState{Start,SelfTest, Calibrate, ShowValues};
 
 
 void balancerLoop(void const* arg) {
 	printf("Board Shaker\r\n");
 
 	GPIO Taster(0,17, GPIO::Direction::INPUT);
-	Acelerometer ACC;
+	ACCSystem ACC;
 	SAnzeige Anzeige(SAnzeige::Interface::SSP1,2,2);
 
 	ProgrammState State = ProgrammState::Start;
@@ -67,11 +39,8 @@ void balancerLoop(void const* arg) {
 		return;
 	}
 
-	/* Initialisierung von SAnzeige fehlt!!!!!!!!!!!!!!!!*/
-	/*In mma7455.cpp  is the implementation hidden through a macro definition!!!*/
 
-
-	int8_t refValues[3];			//x,y,z reference values
+	int8_t refValues[3];		//x,y,z reference values
 	int8_t actualValues[3];		//x,y,z actual values
 
 	for(int i = 0; i < 3; i++)
@@ -89,8 +58,25 @@ void balancerLoop(void const* arg) {
 		case ProgrammState::Start:
 
 			printf("\r\nPress the button to start.\r\n");
-			while(!SW2isPressed(Taster));
-			NextState = ProgrammState::Calibrate;
+			while(!ACC.SW2isPressed(Taster));
+			NextState = ProgrammState::SelfTest;
+			break;
+
+		case ProgrammState::SelfTest:
+
+			printf("\r\nSelfTest is running .....\r\n");
+
+			if(ACC.selftest())
+			{
+				printf("\r\nTest passed!\r\n");
+				NextState = ProgrammState::Calibrate;
+			}
+			else
+			{
+				printf("\r\n[ERROR] --> test failed\r\n");
+				NextState = ProgrammState::Start;
+			}
+
 			break;
 
 		case ProgrammState::Calibrate:
@@ -98,11 +84,13 @@ void balancerLoop(void const* arg) {
 			printf("\r\nPlease lift the board and set it in your desired position\r\n");
 			printf("\r\nAfter that, press the Button to set the zero values\r\n");
 
-			while(!SW2isPressed(Taster));
+			while(!ACC.SW2isPressed(Taster));
 
-			if(Calibrate(ACC,refValues))
+			if(ACC.Calibrate(refValues)){
+				printf("\r\n Calibration completed. \r\n");
 				NextState = ProgrammState::ShowValues;
-			else
+			}
+				else
 			{
 				printf("\r\n[ERROR] --> calibration failed\r\n");
 				NextState = ProgrammState::Start;
@@ -111,15 +99,15 @@ void balancerLoop(void const* arg) {
 
 		case ProgrammState::ShowValues:
 
-			if(!ShowValues(ACC,Anzeige,actualValues,refValues))
+			if(!ACC.ShowValues(Anzeige,actualValues,refValues))
 			{
 				printf("\r\n[ERROR] --> accelerometer failure\r\n");
 				NextState = ProgrammState::Start;
 			}
 
-			Anzeige.off();
+			//Anzeige.off();
 
-			if(SW2isPressed(Taster))
+			if(ACC.SW2isPressed(Taster))
 				NextState = ProgrammState::Start;
 			else
 				NextState = ProgrammState::ShowValues;
@@ -133,7 +121,9 @@ void balancerLoop(void const* arg) {
 	/* --Thank you for the fish. */
 }
 
-bool SW2isPressed(GPIO& Taster)
+ACCSystem::ACCSystem():MMA7455(){};
+
+bool ACCSystem::SW2isPressed(GPIO& Taster)
 {
 	if(!Taster.get())
 	{
@@ -144,56 +134,89 @@ bool SW2isPressed(GPIO& Taster)
 	return false;
 }
 
-bool Calibrate(Acelerometer&  ACC, int8_t *refValues)
+bool ACCSystem::selftest(){
+
+	bool retvalue = false;
+
+	uint8_t mode= modeControl();
+	int8_t valuesBefore[3];
+	int8_t valuesAfter[3];
+
+	if(mode != 0xff)
+	{
+		raw(valuesBefore[0],valuesBefore[1],valuesBefore[2]);
+		mode |= (1<<4);
+		if(!cmd(Register::MCTL,mode))
+				return retvalue;
+
+		osDelay(STResponseTime);
+
+		raw(valuesAfter[0],valuesAfter[1],valuesAfter[2]);
+		mode &=~ (1<<4);
+		if(!cmd(Register::MCTL,mode))
+				return retvalue;
+
+		if((valuesAfter[2] - valuesBefore[2]) > STOutMin && (valuesAfter[2] - valuesBefore[2]) <  STOutMax )
+		{
+			retvalue = true;
+			return retvalue;
+		}
+	}
+
+	return retvalue;
+}
+
+bool ACCSystem::Calibrate(int8_t *refValues)
 {
 	bool Test;
-	Test = ACC.raw(refValues[0],refValues[1],refValues[2]);
+	Test = raw(refValues[0],refValues[1],refValues[2]);
 
 	//Failure
 	if(!Test)
 		return Test;
 
-	printf("(\r\n X has the zero position=" "%" PRId8 "\r\n",refValues[0]);
-	printf("(\r\n Y has the zero position=" "%" PRId8 "\r\n",refValues[1]);
-	printf("(\r\n Z has the zero position=" "%" PRId8 "\r\n",refValues[2]);
 
 	return Test;
 }
 
-bool ShowValues(Acelerometer&  ACC, SAnzeige& Anzeige, int8_t *actualValues, int8_t *refValues)
+bool ACCSystem::ShowValues(SAnzeige& Anzeige, int8_t *actualValues, int8_t *refValues)
 {
 	bool Test;
 	bool isZeroPosition = true;
 	/*I wasn't sure for the following values*/
-	uint8_t G = 0x20;
-	uint8_t AD = 0x90;
-	uint8_t EFBC = 0x4b;
+	uint8_t roll_positiv = 0xF7; //A->Bit 3 -> 1000 ->8 oder 0x8
+	uint8_t roll_negativ = 0xFE; //D->Bit 0 ->1-> 1 oder 0x1
+	uint8_t pitch_positiv = 0x7D; //BC-> Bit 4 und 6 ->0x7D
+	uint8_t pitch_negativ = 0xAF; //FE -> Bit 7 und 1 -> 0xAF
+	uint8_t zero_Position = 0xFB; //G -> Bit 2 -> 4 oder 0x4
 
-	Test = ACC.raw(actualValues[0],actualValues[1],actualValues[2]);
+
+	Test = raw(actualValues[0],actualValues[1],actualValues[2]);
 
 	//Failure
 	if(!Test)
 		return Test;
 
 	int8_t difference[3];
+	Anzeige.off();
 
 	//Calculation
 	for(int i = 0; i < 3; i++)
 	{
 		difference[i] = actualValues[i] - refValues[i];
 
-		if(difference[i] != 0)
+		if(difference[i] >= 5)
 		{
 			isZeroPosition = false;			//the z direction influences this variable too
 
 			switch(i){
 
 			case 0:
-				Anzeige.set(AD);	//rollen
+				Anzeige.set(pitch_negativ);	//pitch negativ
 				break;
 
 			case 1:
-				Anzeige.set(EFBC);	//knicken
+				Anzeige.set(roll_positiv);	//roll negativ
 				break;
 
 			//we don't care for the z position
@@ -201,13 +224,32 @@ bool ShowValues(Acelerometer&  ACC, SAnzeige& Anzeige, int8_t *actualValues, int
 				break;
 			}
 		}
+		if(difference[i] <= -5)
+				{
+					isZeroPosition = false;			//the z direction influences this variable too
+
+					switch(i){
+
+					case 0:
+						Anzeige.set(pitch_positiv);	//pitch positiv
+						break;
+
+					case 1:
+						Anzeige.set(roll_negativ);	//roll positiv
+						break;
+
+					//we don't care for the z position
+					default:
+						break;
+					}
+				}
+
 	}
 
 	if(isZeroPosition)
 	{
-		Anzeige.set(G);
+		Anzeige.set(zero_Position);
 	}
 
 	return Test;
 }
-
